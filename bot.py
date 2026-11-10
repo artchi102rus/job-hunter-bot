@@ -59,14 +59,14 @@ def search_jobs():
         "work_format": "REMOTE",
         "order_by": "publication_time",
         "period": 1,
-        "per_page": 100,
+        "per_page": 50,
         "page": 0,
     }
 
     url = "https://api.hh.ru/vacancies?" + urlencode(params)
 
     headers = {
-        "User-Agent": "JobHunterBot/1.0 (personal-job-monitor)"
+        "HH-User-Agent": "JobHunterBot/1.0 (alex3456763@gmail.com)"
     }
 
     if HH_TOKEN:
@@ -150,6 +150,12 @@ def main():
     try:
         jobs = search_jobs()
     except (HTTPError, URLError) as error:
+	if isinstance(error, HTTPError):
+            print("HTTP status:", error.code)
+            print(
+                "HH response:",
+                error.read().decode("utf-8", errors="replace")[:1500]
+            )
         print(f"HH API error: {error}")
         if isinstance(error, HTTPError) and error.code in (403, 429):
             send_message(
