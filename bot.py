@@ -4,122 +4,98 @@ import json
 import html
 from pathlib import Path
 from urllib.request import Request, urlopen
-from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
-
-# ========== SETTINGS ==========
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-HH_TOKEN = os.getenv("HH_ACCESS_TOKEN", "")
 
 STATE_FILE = Path("seen_jobs.json")
 MAX_MESSAGES = 5
 
-SEARCH_TEXT = "техническая поддержка"
-
 KEYWORDS = [
-    "поддерж",
-    "support",
-    "helpdesk",
-    "help desk",
-    "service desk",
+    "support", "helpdesk", "help desk",
+    "service desk", "customer success",
+    "customer care", "technical assistance",
+    "qa tester", "qa analyst",
+    "manual tester", "quality assurance",
+    "ai trainer", "ai data", "data annotator",
+    "data quality",
 ]
 
 EXCLUDED = [
-    "руководитель",
-    "директор",
-    "начальник",
-    "продаж",
-    "телемаркет",
-    "колл-центр",
-    "call center",
+    "director", "head of", "vice president",
+    "senior software engineer", "sales executive",
+    "account executive", "call center",
+    "telemarketing",
+]
+
+BLOCKED_LOCATIONS = [
+    "us only", "usa only", "united states only",
+    "canada only", "uk only",
 ]
 
 
-# ========== HTTP REQUESTS ==========
-
-def request_json(url, data=None, headers=None):
+def get_json(url, data=None):
     request = Request(
         url,
         data=data,
-        headers=headers or {},
+        headers={
+            "User-Agent": "JobHunterBot/1.0",
+            "Accept": "application/json",
+        },
     )
 
     with urlopen(request, timeout=30) as response:
         return json.load(response)
 
 
-# ========== TELEGRAM ==========
+def send_message(text):
+    from urllib.parse import urlencode
 
-def send_message(message):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
     payload = urlencode({
         "chat_id": CHAT_ID,
-        "text": message,
+        "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": "true",
     }).encode("utf-8")
 
-    request_json(url, data=payload)
-    print("Telegram: message sent")
+    get_json(url, payload)
+    print("Telegram message sent", flush=True)
 
-
-# ========== HISTORY ==========
 
 def load_seen():
     if not STATE_FILE.exists():
         return set()
 
-    try:
-        content = STATE_FILE.read_text(encoding="utf-8")
-        return set(json.loads(content))
-    except (ValueError, OSError) as error:
-        print("History error:", error)
-        return set()
+    return set(json.loads(
+        STATE_FILE.read_text(encoding="utf-8")
+    ))
 
 
 def save_seen(seen):
     STATE_FILE.write_text(
-        json.dumps(sorted(seen), ensure_ascii=False),
+        json.dumps(sorted(seen)),
         encoding="utf-8",
     )
 
 
-# ========== HH SEARCH ==========
-
 def search_jobs():
-    params = {
-        "text": SEARCH_TEXT,
-        "work_format": "REMOTE",
-        "order_by": "publication_time",
-        "period": 1,
-        "per_page": 50,
-        "page": 0,
-    }
+    url = "https://remotive.com/api/remote-jobs"
+    result = get_json(url)
 
-    url = "https://api.hh.ru/vacancies?" + urlencode(params)
+    jobs = result.get("jobs", [])
+    print("Received jobs:", len(jobs), flush=True)
 
-    headers = {
-        "User-Agent": "JobHunterBot/1.0 (alex3456763@gmail.com)",
-        "Accept": "application/json",
-    }
+    return jobs
 
-    if HH_TOKEN:
-        headers["Authorization"] = f"Bearer {HH_TOKEN}"
-
-    print("Searching HH.ru...")
-    result = request_json(url, headers=headers)
-
-    print("Total results:", result.get("found", 0))
-    return result.get("items", [])
-
-
-# ========== FILTERS ==========
 
 def suitable(job):
-    title = job.get("name", "").lower()
+    title = job.get("title", "").lower()
+    location = job.get(
+        "candidate_required_location", ""
+    ).lower()
 
     if not any(word in title for word in KEYWORDS):
         return False
@@ -127,111 +103,71 @@ def suitable(job):
     if any(word in title for word in EXCLUDED):
         return False
 
+    if any(word in location for word in BLOCKED_LOCATIONS):
+        return False
+
     return True
 
 
-# ========== SALARY ==========
-
-def format_salary(job):
-    salary = job.get("salary_range") or job.get("salary")
-
-    if not salary:
-        return "Не указана"
-
-    low = salary.get("from")
-    high = salary.get("to")
-    currency = salary.get("currency", "")
-
-    if low is not None and high is not None:
-        amount = f"{low:,}–{high:,}"
-    elif low is not None:
-        amount = f"от {low:,}"
-    elif high is not None:
-        amount = f"до {high:,}"
-    else:
-        return "Не указана"
-
-    return f"{amount} {currency}"
-
-
-# ========== MESSAGE FORMAT ==========
-
 def format_job(job):
-    title = html.escape(job.get("name", "Вакансия"))
-
-    employer = job.get("employer") or {}
-    company = html.escape(employer.get("name", "Не указана"))
-
-    salary = html.escape(format_salary(job))
-
-    link = html.escape(
-        job.get("alternate_url") or "",
-        quote=True,
+    title = html.escape(job.get("title") or "")
+    company = html.escape(job.get("company_name") or "")
+    location = html.escape(
+        job.get("candidate_required_location") or "Не указано"
     )
+    salary = html.escape(
+        job.get("salary") or "Не указана"
+    )
+    link = html.escape(job.get("url") or "", quote=True)
 
-    message = (
+    return (
         f"🔎 <b>{title}</b>\n\n"
         f"🏢 {company}\n"
-        f"🏠 Удалённая работа\n"
-        f"💰 {salary}\n\n"
-        f'<a href="{link}">Открыть вакансию</a>'
+        f"🌍 Регион: {location}\n"
+        f"💰 Зарплата: {salary}\n"
+        f"📌 Источник: Remotive\n\n"
+        f'<a href="{link}">Открыть вакансию</a>\n\n'
+        f"⚠️ Проверь звонки, английский "
+        f"и возможность работы из Вьетнама."
     )
 
-    return message
-
-
-# ========== MAIN ==========
 
 def main():
-    print("Job Hunter started")
+    print("Job Hunter started", flush=True)
 
     seen = load_seen()
-    print("Previously seen jobs:", len(seen))
+    first_run = len(seen) == 0
 
     try:
         jobs = search_jobs()
-
-    except HTTPError as error:
-        print("HH HTTP status:", error.code)
-
-        body = error.read().decode(
-            "utf-8", errors="replace"
-        )
-
-        print("HH response:", body[:1500])
-        print("HH request failed")
+    except (HTTPError, URLError) as error:
+        print("Remotive request failed:", error, flush=True)
         raise
 
-    except URLError as error:
-        print("Network error:", error.reason)
-        raise
-
-    print("Received jobs:", len(jobs))
+    matching = [job for job in jobs if suitable(job)]
 
     new_jobs = [
-        job for job in jobs
-        if suitable(job)
-        and str(job["id"]) not in seen
+        job for job in matching
+        if f"remotive:{job['id']}" not in seen
     ]
 
-    print("New suitable jobs:", len(new_jobs))
-
-    sent = 0
+    print("Matching jobs:", len(matching), flush=True)
+    print("New jobs:", len(new_jobs), flush=True)
 
     for job in new_jobs[:MAX_MESSAGES]:
         send_message(format_job(job))
 
-        seen.add(str(job["id"]))
+        seen.add(f"remotive:{job['id']}")
         save_seen(seen)
 
-        sent += 1
+    if first_run and not new_jobs:
+        send_message(
+            "✅ Job Hunter работает!\n"
+            "🔎 Remotive проверен.\n"
+            "Подходящих вакансий пока не найдено."
+        )
 
-    print("Messages sent:", sent)
-
-    if sent == 0:
-        print("No new suitable jobs")
-
-    print("Job Hunter finished")
+    print("Job Hunter finished", flush=True)
 
 
 if __name__ == "__main__":
