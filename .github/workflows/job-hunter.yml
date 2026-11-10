@@ -3,22 +3,47 @@ name: Job Hunter Bot
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '17 */3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: job-hunter
+  cancel-in-progress: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Get repository files
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Run Telegram bot
+      - name: Restore previous vacancies
+        uses: actions/cache/restore@v4
+        with:
+          path: seen_jobs.json
+          key: jobs-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            jobs-
+
+      - name: Search and notify
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HH_ACCESS_TOKEN: ${{ secrets.HH_ACCESS_TOKEN }}
         run: python bot.py
+
+      - name: Save previous vacancies
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: seen_jobs.json
+          key: jobs-${{ github.run_id }}-${{ github.run_attempt }}
