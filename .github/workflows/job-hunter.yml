@@ -34,6 +34,9 @@ jobs:
           restore-keys: |
             jobs-
 
+      - name: Check Python syntax
+        run: python -m py_compile bot.py
+
       - name: Search and notify
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
