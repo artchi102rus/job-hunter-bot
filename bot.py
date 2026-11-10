@@ -1,4 +1,4 @@
-"""Personal Telegram vacancy alerts from Remotive's public API.
+"""Personal Telegram vacancy alerts from Remotive's public API (v3).
 
 The scoring is heuristic, not a guarantee that a job is suitable.
 """
@@ -49,7 +49,7 @@ ROLE_GROUPS = {
 
 SENIOR_TITLES = [
     "senior ", "sr. ", "lead ", "principal ", "staff ", "director", "head of",
-    "vice president", "manager of", "tier iii", "tier 3", "level 3", "l3 support",
+    "vice president", "manager of", "tier iii", "tier 3", "level 3", "l3 support", "level iii",
 ]
 SALES_TITLES = ["sales executive", "sales development", "account executive", "telemarketing"]
 PHONE_PHRASES = [
@@ -58,10 +58,46 @@ PHONE_PHRASES = [
     "voice support", "telephone support", "calls with customers",
 ]
 WRITTEN_PHRASES = ["email support", "chat support", "live chat", "ticketing", "tickets", "written communication"]
-LOCATION_GOOD = ["worldwide", "anywhere", "global", "vietnam", "asia", "apac", "south east asia", "southeast asia"]
-LOCATION_BAD = [
-    "us only", "usa only", "united states only", "canada only", "uk only",
-    "united kingdom only", "europe only", "eu only", "north america only",
+LOCATION_GOOD = [
+    "worldwide", "anywhere", "global", "vietnam", "asia", "apac",
+    "south east asia", "southeast asia", "asia pacific", "asia-pacific",
+]
+
+# US/UK/Europe-only roles are not eligible for someone working from Vietnam.
+# These rules are checked BEFORE scoring; no high score can override them.
+RESTRICTED_LOCATIONS = [
+    r"\b(?:us|u\.?s\.?a?\.?|united states|america|american)\s*(?:only|remote|based|residents?|citizens?)\b",
+    r"\b(?:only|must be based in|residents? of)\s+(?:the\s+)?(?:us|u\.?s\.?a?\.?|united states)\b",
+    r"\b(?:canada|uk|united kingdom|europe|eu|emea|north america|latin america|latam|australia)\s*(?:only|remote|based|residents?)\b",
+]
+
+# Match the *entire* advertised hiring location, including 'USA' (the bug
+# seen in VXI's Patient Care role). Multiple locations are handled below.
+NON_VIETNAM_REGIONS = {
+    "usa", "us", "u.s.", "u.s.a.", "united states", "united states of america",
+    "canada", "uk", "united kingdom", "europe", "eu", "emea",
+    "north america", "latin america", "latam", "australia", "new zealand",
+    "germany", "france", "spain", "portugal", "poland", "romania",
+    "brazil", "mexico", "india", "philippines", "south africa",
+}
+
+# Only reject *required* calls, not 'no phone calls' or optional meetings.
+REQUIRED_PHONE_PATTERNS = [
+    r"\b(?:handle|handling|answer|answering|take|taking|manage|managing|make|making|conduct|conducting)\s+(?:(?:inbound|outbound|customer|client)\s+){0,2}(?:phone\s+)?calls\b",
+    r"\b(?:inbound|outbound)\s+(?:phone\s+)?calls\b",
+    r"\b(?:phone|telephone|voice)\s+(?:based\s+)?(?:customer\s+)?support\b",
+    r"\b(?:call center|call centre|cold calling|telemarketing)\b",
+    r"\b(?:support|assist|communicate with|contact)\s+(?:customers|clients|patients)\s+(?:by|via|over|on)\s+(?:the\s+)?phone\b",
+    r"\b(?:must|required|expected to|responsible for)\b.{0,65}\b(?:phone calls|telephone calls|inbound calls|outbound calls|call handling)\b",
+]
+NEGATED_PHONE_PATTERNS = [
+    r"\b(?:no|without|never|zero)\s+(?:required\s+)?(?:phone\s+)?calls\b",
+    r"\b(?:no|without)\s+(?:phone|telephone|voice)\s+support\b",
+    r"\b(?:non[ -]?voice|chat[ -]?only|email[ -]?only)\b",
+]
+MEDICAL_PHONE_TITLES = [
+    "patient care", "patient advocate", "patient support representative",
+    "patient service representative", "medical call center",
 ]
 
 
@@ -193,6 +229,51 @@ def classify_role(title):
     return None
 
 
+def reject_reason(job, description):
+    """Hard blockers are checked before scoring (best-effort heuristic)."""
+    title = (job.get("title") or "").lower()
+    location = (job.get("candidate_required_location") or "").lower().strip()
+
+    if any(term in title for term in MEDICAL_PHONE_TITLES):
+        return "Medical/patient call-oriented role"
+
+    # Structured location is the most reliable location signal.
+    # Split common multi-region delimiters before checking individual regions.
+    regions = [part.strip(" .()") for part in re.split(r"[,;/|]+|\s+or\s+", location)]
+    good_region = any(term in location for term in LOCATION_GOOD)
+    if not good_region and regions and all(
+        region in NON_VIETNAM_REGIONS or
+        any(re.search(pattern, region) for pattern in RESTRICTED_LOCATIONS)
+        for region in regions if region
+    ):
+        return "Hiring location excludes Vietnam: " + location
+
+    # This catches 'US Remote' in the job title and explicitly restricted ads.
+    if any(re.search(pattern, title) for pattern in RESTRICTED_LOCATIONS):
+        return "Country restriction in job title"
+
+    # Do not reject merely because 'US' is mentioned as HQ or an office.
+    restriction_phrases = [
+        r"\b(?:applicants|candidates|employees|residents)\s+(?:must|need to)\s+(?:be\s+)?(?:located|based|residing)\s+in\s+(?:the\s+)?(?:usa|us|united states|canada|uk|united kingdom|europe|eu)\b",
+        r"\b(?:must|need to|required to)\s+(?:live|reside|be based|be located|work)\s+in\s+(?:the\s+)?(?:usa|us|united states|canada|uk|united kingdom|europe|eu)\b",
+        r"\b(?:only|exclusively)\s+(?:hiring|accepting applications)\s+(?:from|in)\s+(?:the\s+)?(?:usa|us|united states|canada|uk|europe|eu)\b",
+        r"\b(?:us|usa|united states|canada|uk|europe|eu)[ -]only\b",
+    ]
+    if any(re.search(pattern, description) for pattern in restriction_phrases):
+        return "Explicit country restriction in description"
+
+    # Evaluate in sentences, so 'no calls' does not negate an unrelated
+    # sentence that genuinely requires phone support.
+    sentences = re.split(r"[.!?\n]+", description)
+    for sentence in sentences:
+        if any(re.search(pattern, sentence) for pattern in NEGATED_PHONE_PATTERNS):
+            continue
+        if any(re.search(pattern, sentence) for pattern in REQUIRED_PHONE_PATTERNS):
+            return "Required phone/call duties"
+
+    return None
+
+
 def evaluate(job, rates):
     title = job.get("title") or ""
     role = classify_role(title)
@@ -202,6 +283,12 @@ def evaluate(job, rates):
     description = plain_text(job.get("description") or "").lower()
     title_lower = title.lower()
     location = (job.get("candidate_required_location") or "").lower()
+
+    blocked = reject_reason(job, description)
+    if blocked:
+        print("Excluded:", title, "|", blocked, flush=True)
+        return None
+
     score = 65
     notes = []
 
@@ -211,21 +298,17 @@ def evaluate(job, rates):
     if any(term in title_lower for term in SALES_TITLES):
         score -= 30
         notes.append("⚠️ Возможны продажи")
-    if any(term in description for term in PHONE_PHRASES):
-        score -= 25
-        notes.append("⚠️ Упоминаются телефонные звонки")
     if any(term in description for term in WRITTEN_PHRASES):
         score += 12
         notes.append("✅ Есть письменная поддержка / тикеты")
 
     if any(term in location for term in LOCATION_GOOD):
         score += 12
-        notes.append("✅ География выглядит перспективно")
-    elif any(term in location for term in LOCATION_BAD):
-        score -= 35
-        notes.append("⚠️ Регион, вероятно, исключает Вьетнам")
-    else:
+        notes.append("✅ География выглядит перспективно; проверь условия найма")
+    elif location:
         notes.append("❔ Проверь разрешённую страну найма")
+    else:
+        notes.append("❔ География найма не указана")
 
     if re.search(r"\b(c1|c2|native english|native-level english)\b", description):
         score -= 20
@@ -267,7 +350,7 @@ def format_message(job, result):
 
 
 def main():
-    print("Job Hunter v2 started", flush=True)
+    print("Job Hunter v3 started", flush=True)
     seen = load_seen()
     jobs = fetch_json("https://remotive.com/api/remote-jobs").get("jobs", [])
     print("Received jobs:", len(jobs), flush=True)
